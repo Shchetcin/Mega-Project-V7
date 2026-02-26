@@ -1,0 +1,258 @@
+// ================= КОНФИГУРАЦИЯ =================
+const APP_CONFIG = {
+  SHEET_ID: '15h-OZqL316OhvV0nHQzwFtpcCQ5Ynt_KgJkQZgGnLFs',
+  ADMIN_PASSWORD: 'org123',
+  VERSION: '2.0'
+};
+
+// ================= УТИЛИТЫ =================
+function getSpreadsheet() {
+  if (!APP_CONFIG.SHEET_ID) {
+    throw new Error('Установите SHEET_ID в конфигурации');
+  }
+  return SpreadsheetApp.openById(APP_CONFIG.SHEET_ID);
+}
+
+// ================= API =================
+function doGet(e) {
+  try {
+    const action = e.parameter.action;
+    
+    switch(action) {
+      case 'getTeams':
+        return getTeams();
+      case 'getTeamByCode':
+        return getTeamByCode(e.parameter.code);
+      case 'getTransactions':
+        return getTransactions(e.parameter.teamId);
+      case 'getRating':
+        return getRating();
+      default:
+        return serveHTML();
+    }
+  } catch (error) {
+    return createResponse({ error: error.message }, 500);
+  }
+}
+
+function doPost(e) {
+  try {
+    const data = JSON.parse(e.postData.contents);
+    const action = data.action;
+    
+    switch(action) {
+      case 'addPoints':
+        return addPoints(data);
+      case 'checkPassword':
+        return checkPassword(data.password);
+      default:
+        return createResponse({ error: 'Неизвестное действие' }, 400);
+    }
+  } catch (error) {
+    return createResponse({ error: error.message }, 500);
+  }
+}
+
+// ================= БИЗНЕС-ЛОГИКА =================
+function getTeams() {
+  const ss = getSpreadsheet();
+  const sheet = ss.getSheetByName('teams');
+  const data = sheet.getDataRange().getValues();
+  
+  const teams = [];
+  for (let i = 1; i < data.length; i++) {
+    teams.push({
+      id: data[i][0],
+      name: data[i][1],
+      score: data[i][2] || 0,
+      code: data[i][3],
+      contact: data[i][4] || ''
+    });
+  }
+  
+  return createResponse({ teams });
+}
+
+function getTeamByCode(code) {
+  const ss = getSpreadsheet();
+  const sheet = ss.getSheetByName('teams');
+  const data = sheet.getDataRange().getValues();
+  
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][3] && data[i][3].toString().toUpperCase() === code.toUpperCase()) {
+      const team = {
+        id: data[i][0],
+        name: data[i][1],
+        score: data[i][2] || 0,
+        code: data[i][3],
+        contact: data[i][4] || ''
+      };
+      return createResponse({ team });
+    }
+  }
+  
+  return createResponse({ error: 'Команда не найдена' }, 404);
+}
+
+function getTransactions(teamId) {
+  const ss = getSpreadsheet();
+  const sheet = ss.getSheetByName('transactions');
+  const data = sheet.getDataRange().getValues();
+  
+  const transactions = [];
+  for (let i = 1; i < data.length; i++) {
+    if (!teamId || data[i][1] == teamId) {
+      transactions.push({
+        timestamp: data[i][0],
+        teamId: data[i][1],
+        points: data[i][2],
+        reason: data[i][3],
+        moderator: data[i][4]
+      });
+    }
+  }
+  
+  transactions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  
+  return createResponse({ transactions });
+}
+
+function getRating() {
+  const teams = JSON.parse(getTeams().getContent()).data.teams;
+  const sorted = [...teams].sort((a, b) => b.score - a.score);
+  return createResponse({ rating: sorted });
+}
+
+function addPoints(data) {
+  // Проверка пароля
+  if (data.password !== APP_CONFIG.ADMIN_PASSWORD) {
+    return createResponse({ error: 'Неверный пароль' }, 403);
+  }
+  
+  const { teamId, points, reason, moderator } = data;
+  
+  if (!teamId || points === undefined || !reason || !moderator) {
+    return createResponse({ error: 'Не все поля заполнены' }, 400);
+  }
+  
+  // 1. Добавляем транзакцию
+  const ss = getSpreadsheet();
+  const transactionsSheet = ss.getSheetByName('transactions');
+  transactionsSheet.appendRow([
+    new Date(),
+    teamId,
+    points,
+    reason,
+    moderator
+  ]);
+  
+  // 2. Обновляем баллы команды
+  const teamsSheet = ss.getSheetByName('teams');
+  const teamsData = teamsSheet.getDataRange().getValues();
+  
+  let newScore = 0;
+  let teamFound = false;
+  
+  for (let i = 1; i < teamsData.length; i++) {
+    if (teamsData[i][0] == teamId) {
+      teamFound = true;
+      const currentScore = teamsData[i][2] || 0;
+      newScore = currentScore + Number(points);
+      teamsSheet.getRange(i + 1, 3).setValue(newScore);
+      break;
+    }
+  }
+  
+  if (!teamFound) {
+    return createResponse({ error: 'Команда не найдена' }, 404);
+  }
+  
+  return createResponse({ 
+    success: true, 
+    newScore,
+    message: `Начислено ${points} баллов команде ${teamId}`
+  });
+}
+
+function checkPassword(password) {
+  const isValid = password === APP_CONFIG.ADMIN_PASSWORD;
+  return createResponse({ valid: isValid });
+}
+
+// ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
+function createResponse(data, statusCode = 200) {
+  const response = {
+    success: statusCode === 200,
+    data,
+    timestamp: new Date().toISOString(),
+    version: APP_CONFIG.VERSION
+  };
+  
+  const output = ContentService.createTextOutput(JSON.stringify(response));
+  output.setMimeType(ContentService.MimeType.JSON);
+  
+  // В Google Apps Script заголовки устанавливаются по-другому
+  // Мы не можем использовать setHeader, но можем добавить заголовки к ответу
+  // CORS заголовки будут автоматически добавлены при публикации как веб-приложение
+  
+  return output;
+}
+
+function serveHTML() {
+  return HtmlService.createHtmlOutputFromFile('index');
+}
+
+// ================= ТЕСТИРОВАНИЕ =================
+function testAPI() {
+  Logger.log('Тестирование API...');
+  
+  // Тест получения команд
+  const teams = getTeams();
+  Logger.log('Команды:', JSON.parse(teams.getContent()));
+  
+  // Тест добавления баллов
+  const testData = {
+    teamId: 1,
+    points: 10,
+    reason: 'Тест',
+    moderator: 'Тестер',
+    password: APP_CONFIG.ADMIN_PASSWORD
+  };
+  
+  try {
+    const result = addPoints(testData);
+    Logger.log('Тест начисления:', JSON.parse(result.getContent()));
+  } catch (e) {
+    Logger.log('Тест начисления не удался:', e.message);
+  }
+  
+  Logger.log('Тестирование завершено');
+}
+
+function setupTestData() {
+  const ss = getSpreadsheet();
+  
+  // Создаем листы если их нет
+  const sheets = ss.getSheets().map(s => s.getName());
+  
+  if (!sheets.includes('teams')) {
+    const teamsSheet = ss.insertSheet('teams');
+    teamsSheet.appendRow(['ID', 'Название команды', 'Баллы', 'Код доступа', 'Контакт']);
+    teamsSheet.appendRow([1, 'Команда Альфа', 0, 'ALPHA1', '']);
+    teamsSheet.appendRow([2, 'Команда Бета', 0, 'BETA2', '']);
+    teamsSheet.appendRow([3, 'Команда Гамма', 0, 'GAMMA3', '']);
+  }
+  
+  if (!sheets.includes('transactions')) {
+    const transSheet = ss.insertSheet('transactions');
+    transSheet.appendRow(['Время', 'ID команды', 'Баллы', 'Причина', 'Кто начислил']);
+  }
+  
+  Logger.log('Тестовые данные созданы');
+}
+
+// Функция для ручного добавления тестовых данных
+function init() {
+  setupTestData();
+  Logger.log('Система инициализирована');
+}
